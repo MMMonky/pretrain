@@ -1,3 +1,4 @@
+
 import math
 from dataclasses import dataclass
 import torch
@@ -112,24 +113,24 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-            # idx is of shape (B, T)
-            B, T = idx.size()
-            assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
-            # forward the token and posisition embeddings
-            pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
-            pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
-            tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
-            x = tok_emb + pos_emb
-            # forward the blocks of the transformer
-            for block in self.transformer.h:
-                x = block(x)
-            # forward the final layernorm and the classifier
-            x = self.transformer.ln_f(x)
-            logits = self.lm_head(x) # (B, T, vocab_size)
-            loss = None
-            if targets is not None:
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-            return logits, loss
+        # idx is of shape (B, T)
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        # forward the token and posisition embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
+        x = tok_emb + pos_emb
+        # forward the blocks of the transformer
+        for block in self.transformer.h:
+            x = block(x)
+        # forward the final layernorm and the classifier
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -214,6 +215,8 @@ class DataLoaderLite:
 
 # -----------------------------------------------------------------------------
 # attempt to autodetect the device
+import time
+
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
@@ -225,23 +228,32 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=16, T=1024)
+
+torch.set_float32_matmul_precision('high')
 
 # get logits
 model = GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model)
 
 # optimize!
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}")
-    
+    torch.cuda.synchronize() # wait for the GPU to finish work
+    t1 = time.time()
+    dt = (t1 - t0)*1000 # time difference in miliseconds
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+
 import sys; sys.exit(0)
 
 # prefix tokens
